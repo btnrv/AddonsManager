@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using AddonsManager.Clients;
 using AddonsManager.Config;
 using AddonsManager.Extensions;
@@ -16,22 +17,34 @@ using SwiftlyS2.Shared.ProtobufDefinitions;
 
 namespace AddonsManager.Hooks;
 
-public class AddonsHooks
+public class AddonsHooks : IDisposable
 {
-    private ISwiftlyCore Core;
-    private AddonsWorkshopManager WorkshopManager;
-    private AddonsClients Clients;
-    private AddonsUtilities Utilities;
+    private readonly ISwiftlyCore Core;
+    private readonly AddonsWorkshopManager WorkshopManager;
+    private readonly AddonsClients Clients;
+    private readonly AddonsUtilities Utilities;
 
     public unsafe delegate void SetPendingHostStateRequestDelegate(nint hostStateManager, CHostStateRequest* pRequest);
     public delegate void ReplyConnection(nint server, nint client);
     public delegate ulong ScriptGetAddon();
     public delegate nint OnSteamServerConnect(nint pThis);
 
-    private IUnmanagedFunction<SetPendingHostStateRequestDelegate>? _SetPendingHostStateRequestDelegate;
-    private IUnmanagedFunction<ReplyConnection>? _ReplyConnection;
-    private IUnmanagedFunction<ScriptGetAddon>? _ScriptGetAddon;
-    private IUnmanagedFunction<OnSteamServerConnect>? _OnSteamServerConnect;
+    private readonly IUnmanagedFunction<SetPendingHostStateRequestDelegate>? _SetPendingHostStateRequestDelegate;
+    private readonly IUnmanagedFunction<ReplyConnection>? _ReplyConnection;
+    private readonly IUnmanagedFunction<ScriptGetAddon>? _ScriptGetAddon;
+    private readonly IUnmanagedFunction<OnSteamServerConnect>? _OnSteamServerConnect;
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    private delegate bool SendNetMessageNative(nint client, nint message, NetChannelBufType_t bufferType);
+
+    private readonly IUnmanagedFunction<SendNetMessageNative> _sendNetMessage;
+    private Guid _sendNetMessageHook;
+
+    // The first signon can precede both ReplyConnection and PlayerManager registration.
+    // Borrow the network client only while the framework's typed hook is executing.
+    [ThreadStatic]
+    private static nint _sendingClient;
 
     public AddonsHooks(ISwiftlyCore core, AddonsWorkshopManager workshopManager, AddonsClients clients, AddonsUtilities utils, IOptionsMonitor<AddonsConfig> config)
     {
@@ -59,9 +72,13 @@ public class AddonsHooks
                             var bValveMap = Core.GameFileSystem.FileExists($"maps/{pRequest->m_LevelName.Value}.vpk", "MOD");
 
                             if (!string.IsNullOrEmpty(pRequest->m_Addons.Value))
+                            {
                                 Utilities.SetCurrentWorkshopMap(pRequest->m_Addons.Value);
+                            }
                             else if (bValveMap)
+                            {
                                 Utilities.ClearCurrentWorkshopMap();
+                            }
                         }
                         else if (!pRequest->m_pKV->GetName().Equals("changelevel", StringComparison.OrdinalIgnoreCase))
                         {
@@ -72,15 +89,23 @@ public class AddonsHooks
                                 // Prevents corruption if the same CHostStateRequest struct is reused and m_Addons
                                 // already contains a comma-separated list from a previous hook invocation.
                                 if (string.IsNullOrEmpty(workshopMapId) && !pRequest->m_Addons.Value.Contains(','))
+                                {
                                     workshopMapId = pRequest->m_Addons.Value;
+                                }
 
                                 if (!string.IsNullOrEmpty(workshopMapId))
+                                {
                                     Utilities.SetCurrentWorkshopMap(workshopMapId);
+                                }
                                 else
+                                {
                                     Utilities.ClearCurrentWorkshopMap();
+                                }
                             }
                             else
+                            {
                                 Utilities.ClearCurrentWorkshopMap();
+                            }
                         }
                         else
                         {
@@ -88,12 +113,16 @@ public class AddonsHooks
                         }
 
                         if (!string.IsNullOrEmpty(pRequest->m_Addons.Value) && Core.GameFileSystem.IsDirectory(pRequest->m_Addons.Value, "OFFICIAL_ADDONS"))
+                        {
                             Utilities.SetCurrentWorkshopMap(pRequest->m_Addons.Value);
+                        }
 
                         if (Utilities.GetMountedAddons().Count == 0)
                         {
                             if (!string.IsNullOrEmpty(Utilities.GetCurrentWorkshopMap()))
+                            {
                                 pRequest->m_Addons = Utilities.GetCurrentWorkshopMap();
+                            }
                         }
                         else if (string.IsNullOrEmpty(Utilities.GetCurrentWorkshopMap()))
                         {
@@ -157,7 +186,9 @@ public class AddonsHooks
                         }
 
                         if (!clientInfo.DownloadedAddons.Contains(clientAddons.First()))
+                        {
                             clientInfo.CurrentPendingAddon = clientAddons.First();
+                        }
 
                         // Keep only already-downloaded addons plus the single current pending one.
                         // Sending undownloaded addons to the client causes CS2 to perform a signature
@@ -195,7 +226,9 @@ public class AddonsHooks
                         }
 
                         if (!nextCalled)
+                        {
                             next()(server, client);
+                        }
                     }
                 };
             }
@@ -207,10 +240,16 @@ public class AddonsHooks
             {
                 try
                 {
-                    if (config.CurrentValue.Addons.Count == 0 && WorkshopManager.ExtraAddonsCount == 0) return next()();
+                    if (config.CurrentValue.Addons.Count == 0 && WorkshopManager.ExtraAddonsCount == 0)
+                    {
+                        return next()();
+                    }
 
                     var iAddon = ulong.TryParse(Utilities.GetCurrentWorkshopMap(), out var workshopId) ? workshopId : 0;
-                    if (iAddon == 0) return next()();
+                    if (iAddon == 0)
+                    {
+                        return next()();
+                    }
 
                     return iAddon;
                 }
@@ -231,6 +270,43 @@ public class AddonsHooks
                 return returnValue;
             };
         });
+
+        // Read the current vtable entry: SwiftlyS2 has already installed its SendNetMessage
+        // trampoline there. Our next() enters that trampoline and its typed message hook.
+        var clientVtable = core.Memory.GetVTableAddress("engine2", "CServerSideClient")
+            ?? throw new InvalidOperationException("CServerSideClient vtable was not found.");
+        _sendNetMessage = core.Memory.GetUnmanagedFunctionByVTable<SendNetMessageNative>(
+            clientVtable, core.GameData.GetOffset("CServerSideClient::SendNetMessage"));
+        _sendNetMessageHook = _sendNetMessage.AddHook(next =>
+            (client, message, bufferType) => SendWithClientContext(client, message, bufferType, next));
+        if (_sendNetMessageHook == Guid.Empty)
+        {
+            throw new InvalidOperationException("Could not install the addon signon client context hook.");
+        }
+    }
+
+    private static bool SendWithClientContext(nint client, nint message, NetChannelBufType_t bufferType,
+        Func<SendNetMessageNative> next)
+    {
+        var previousClient = _sendingClient;
+        _sendingClient = client;
+        try
+        {
+            return next()(client, message, bufferType);
+        }
+        finally
+        {
+            _sendingClient = previousClient;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_sendNetMessageHook != Guid.Empty)
+        {
+            _sendNetMessage.RemoveHook(_sendNetMessageHook);
+            _sendNetMessageHook = Guid.Empty;
+        }
     }
 
     [EventListener<EventDelegates.OnStartupServer>]
@@ -274,20 +350,17 @@ public class AddonsHooks
     {
         try
         {
-            var player = Core.PlayerManager.GetPlayer(playerid);
-            ulong steamId;
-            if (player == null)
+            // Use the actual recipient, including before a managed player exists and after
+            // it is removed during a map change. A reused slot is not a client identity.
+            var steamId = _sendingClient != 0
+                ? Core.Memory.ToServerSideClient(_sendingClient).SteamID.GetSteamID64()
+                : Core.PlayerManager.GetPlayer(playerid)?.UnauthorizedSteamID;
+            if (steamId is null)
             {
-                var sid = Clients.GetSteamIdBySlot(playerid);
-                if (sid == null) return HookResult.Continue;
-                steamId = sid.Value;
-            }
-            else
-            {
-                steamId = player.UnauthorizedSteamID;
+                return HookResult.Continue;
             }
 
-            var clientInfo = Clients.GetClientInfo(steamId);
+            var clientInfo = Clients.GetClientInfo(steamId.Value);
             clientInfo.LastActiveTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var clientAddons = Clients.GetClientAddons();
 
@@ -313,7 +386,10 @@ public class AddonsHooks
                 clientAddons.Remove(downloadedAddon);
             }
 
-            if (clientAddons.Count == 0) return HookResult.Continue;
+            if (clientAddons.Count == 0)
+            {
+                return HookResult.Continue;
+            }
 
             Core.Logger.LogDebug("Client {SteamID} has pending addons: {Addons}", steamId, string.Join(", ", clientAddons));
 

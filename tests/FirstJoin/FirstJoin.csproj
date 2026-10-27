@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <OutputPath>$(MSBuildThisFileDirectory)build/</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../AddonsManager/AddonsManager.csproj" />
+    <!-- The server supplies these assemblies in production; the harness runs outside CS2. -->
+    <PackageReference Include="SwiftlyS2.CS2" Version="*-*" />
+  </ItemGroup>
+</Project>

@@ -1,20 +1,20 @@
-using SwiftlyS2.Shared.Plugins;
-using SwiftlyS2.Shared;
+using AddonsManager.Api;
+using AddonsManager.Clients;
+using AddonsManager.Commands;
 using AddonsManager.Config;
+using AddonsManager.Contract;
+using AddonsManager.Hooks;
+using AddonsManager.SteamWorkshop;
+using AddonsManager.Utils;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using AddonsManager.Utils;
-using AddonsManager.SteamWorkshop;
-using AddonsManager.Commands;
-using AddonsManager.Hooks;
-using AddonsManager.Clients;
-using AddonsManager.Api;
-using AddonsManager.Contract;
+using SwiftlyS2.Shared;
+using SwiftlyS2.Shared.Plugins;
 
 namespace AddonsManager;
 
-[PluginMetadata(Id = "AddonsManager", Version = "2.1.0", Name = "Addons Manager", Author = "Swiftly Development Team", Description = "No description.")]
+[PluginMetadata(Id = "AddonsManager", Version = "2.1.1", Name = "Addons Manager", Author = "Swiftly Development Team", Description = "No description.")]
 public class AddonsManager(ISwiftlyCore core) : BasePlugin(core)
 {
     public IServiceProvider? ServiceProvider;

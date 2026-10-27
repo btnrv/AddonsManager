@@ -17,6 +17,16 @@
 - Build the project. The output DLL and resources will be placed in the `build/` directory.
 - The publish process will also create a zip file for easy distribution.
 
+## First-join addon delivery
+
+Version 2.1.1 resolves signon recipients from the network client while the message is being sent. The initial signon can occur before `ReplyConnection` and before SwiftlyS2 creates a managed player. Looking up only a managed player or remembering the last occupant of a slot could skip addon downloads for a newcomer or use another client's cache.
+
+The plugin wraps the framework's current `CServerSideClient::SendNetMessage` vtable entry to expose the borrowed client pointer to the existing typed signon handler. The context is thread-local, restored after nested sends or exceptions, and its hook is removed on unload. It does not retain client pointers after the send or change the download/cache policy. The vtable index comes from SwiftlyS2's `CServerSideClient::SendNetMessage` gamedata; no numeric offset is copied into this plugin.
+
+The ABI and callback ordering were checked against SwiftlyS2 `v1.5.1-beta.3`: [native SendNetMessage](https://github.com/swiftly-solution/swiftlys2/blob/v1.5.1-beta.3/src/network/netmessages/netmessages.cpp), [vtable trampoline](https://github.com/swiftly-solution/swiftlys2/blob/v1.5.1-beta.3/src/memory/hooks/vfunction.cpp), and [managed vtable lookup](https://github.com/swiftly-solution/swiftlys2/blob/v1.5.1-beta.3/managed/src/SwiftlyS2.Core/Modules/Memory/MemoryService.cs). The native function returns a one-byte `bool`; `NetChannelBufType_t` is the framework's signed-byte enum. This preserves the framework's protobuf handling and follows [MultiAddonManager's network-client identity route](https://github.com/Source2ZE/MultiAddonManager/blob/master/src/multiaddonmanager.cpp).
+
+See [the managed regression checks](tests/FirstJoin/README.md) for validation and the remaining live-client checks.
+
 ## Publishing
 
 - Use the `dotnet publish -c Release` command to build and package your plugin.
